@@ -1,0 +1,11 @@
+{
+  "id": "average-empty",
+  "requirement": "修改数字统计模块中的 average 函数：空列表返回 None；非空列表保持原有平均值计算行为，不修改输入列表，并保持现有调用方和无关函数的行为。",
+  "examples": [
+    {"input": [], "expected": null},
+    {"input": [7], "expected": 7.0},
+    {"input": [2, 4], "expected": 3.0},
+    {"input": [-2, 2], "expected": 0.0},
+    {"input": [0], "expected": 0.0}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "id": "average-ambiguous",
+  "requirement": "优化数字统计模块中 average 函数对异常输入的处理。",
+  "ambiguities": [
+    "空列表应返回 None、返回 0，还是抛出异常？",
+    "非数字元素应被忽略，还是应抛出异常？"
+  ]
+}

@@ -1,4 +1,4 @@
-"""Validate product documentation without third-party dependencies."""
+"""Validate product and acceptance documentation without dependencies."""
 
 import re
 import unittest
@@ -7,13 +7,19 @@ from urllib.parse import unquote, urlsplit
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PRODUCT_DOCS = REPO_ROOT / "docs" / "product"
+DOCUMENT_ROOTS = [
+    REPO_ROOT / "docs",
+    REPO_ROOT / "tests" / "fixtures",
+    REPO_ROOT / "tests" / "acceptance",
+]
 
 
 class ProductDocsTests(unittest.TestCase):
     def setUp(self):
-        self.documents = sorted(PRODUCT_DOCS.rglob("*.md"))
-        self.assertTrue(self.documents, "No product documentation found")
+        self.documents = sorted(
+            document for root in DOCUMENT_ROOTS for document in root.rglob("*.md")
+        )
+        self.assertTrue(self.documents, "No documentation found")
 
     def test_documents_are_utf8_text_with_final_newline(self):
         for document in self.documents:
