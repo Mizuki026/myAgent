@@ -72,11 +72,29 @@
 | A14a | R08–R10 | 注入测试用凭据并完成任务 | 报告、日志、事件和 commit 可追踪，且不包含凭据原文 |
 | A14b | R08–R09 | 用户已有未提交文件或代码改动 | 原有改动保留，不被覆盖或混入 Agent 的交付 commit |
 
-## 5. 验收入口与当前状态
+## 5. 验收入口与运行方式
 
-当前仓库尚未实现 Agent。CLI 的输入与报告协议尚待确认；确认后在 `tests/acceptance/` 中通过公开入口执行上述场景，并在本文补充运行命令与具体测试映射。
+用户已确认通过 CLI 的 JSON 输入和报告验收，允许本次行为测试处于预期 RED 状态。具体输入、退出码、报告与模型替身协议见 [CLI 验收契约](cli-contract.md)。
 
-本次先整理可独立验证的样例项目与需求判定数据。测试工具自检必须核实：原始回归测试通过、原始实现确实不满足新需求、正确实现满足需求，以及典型错误实现会被判定失败。
+行为测试位于 [test_mvp.py](../../tests/acceptance/test_mvp.py)，方法名中的 `A01`–`A14` 与本文场景编号对应。同一编号的边界条件拆为多个可独立运行的方法。文件读写、Git、进程执行和任务持久化均由真实 Agent 完成，测试只替换外部模型。
+
+```powershell
+python -B -m unittest discover -s tests/acceptance -t . -p 'test_*.py' -v
+```
+
+测试工具自检独立运行：
+
+```powershell
+python -B -m unittest tests.test_product_docs tests.test_acceptance_fixtures tests.test_acceptance_harness -v
+```
+
+自检核实原始回归通过、原始实现不满足新需求、正确实现通过，以及典型错误实现会被判定失败；同时验证模型替身、JUnit 输出和测试基础设施。自检通过不等于产品行为验收通过。
+
+当前仓库尚未实现 Agent CLI，因此行为测试应明确失败于入口未生成报告；不使用跳过、`expectedFailure` 或模拟整个 Agent 获得通过。后续实现必须使同一套测试实际转绿。
+
+本次实际执行结果见 [验证记录](phase-1-validation.md)。
+
+A12 使用进程退出后的受控检查点恢复验证累计预算与持久化。强制结束进程后的恢复、真实 DeepSeek 连通性与质量、流式输出及 API 传输故障重试暂不在本次执行范围。
 
 ## 6. 通过标准
 
