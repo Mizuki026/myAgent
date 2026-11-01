@@ -1,47 +1,53 @@
 # 第一阶段验收测试验证记录
 
-日期：2026-10-31。环境：Windows、Python 3.13.12。
+日期：2026-11-01。环境：Windows、Python 3.13.12、uv 0.12.4。
 
 ## 1. 当前结论
 
-验收说明、CLI 契约、可执行行为测试和测试数据已建立。Agent CLI 尚未实现，产品行为验收当前为 RED，不能视为本阶段产品已经验收通过。
+第一阶段 CLI 与任务闭环已实现。行为验收调用真实 CLI、文件工具、命令执行器、SQLite 状态存储和 Git 提交；模型端由本地 HTTP 替身控制，不调用 DeepSeek 服务。
 
-用户已确认允许本次行为验收处于 RED 状态；测试工具与示例项目自检仍须通过。
+`tests/generated_acceptance` 是 Coding Agent 为用户任务生成验收测试的位置，不属于 Agent 自身的开发测试集合；pytest 配置会排除该目录。
 
-## 2. 实际执行结果
+## 2. 验证结果
 
 | 验证项 | 结果 |
 | --- | --- |
-| 完整测试集合 | 实际执行 47 项 |
-| 文档、样例和测试工具自检 | 18 项通过 |
-| Agent 行为验收 | 29 项失败，均为 CLI 未生成报告 |
-| 非断言运行错误 | 0 项 |
-| 跳过 | 0 项 |
-| `expectedFailure` | 0 项 |
-| Python 语法检查 | 18 个 Python 文件解析通过 |
+| Agent 行为验收 A01–A14 | 29 项通过 |
+| 文档、样例、模型替身及测试工具自检 | 18 项通过 |
+| Agent 工作区工具自测 | 6 项通过 |
+| pytest 开发测试集合 | 53 项通过，56 个子测试通过 |
+| Ruff 检查与格式验证 | 通过 |
+| uv 锁文件一致性 | 通过 |
+| DeepSeek 实际 API 调用 | 未执行，离线验收不需要真实凭据 |
 
-完整集合退出码为 1。29 项行为失败的根因均为默认入口 `python -B -m app` 尚不可运行，错误信息包含：`No module named app.__main__`。没有通过模拟整个 Agent、跳过或标记预期失败使产品测试转绿。
-
-这次执行只能证明测试可发现、可运行，且未实现时正确失败；各场景的后续行为断言需要在真实 CLI 接入后继续验证。
+行为验收覆盖修改预算、无修改结果、澄清、受控编辑、越界路径、进程超时和输出限制、固定验收保护、测试报告判定、任务恢复、提交隔离及凭据不泄漏。
 
 ## 3. 复现命令
 
-在仓库根目录运行自检：
+项目环境和锁文件由 uv 管理。运行代码检查：
 
 ```powershell
-python -B -m unittest tests.test_product_docs tests.test_acceptance_fixtures tests.test_acceptance_harness -v
+uv --cache-dir .uv-cache run --offline ruff check app tests/test_agent_workspace.py
+uv --cache-dir .uv-cache run --offline ruff format --check app tests/test_agent_workspace.py
+uv --cache-dir .uv-cache lock --check --offline
 ```
 
-运行行为验收：
+运行文档、样例和工具自检：
+
+```powershell
+python -B -m unittest tests.test_product_docs tests.test_acceptance_fixtures tests.test_acceptance_harness tests.test_agent_workspace -v
+```
+
+运行 Agent 行为验收：
 
 ```powershell
 python -B -m unittest discover -s tests/acceptance -t . -p 'test_*.py' -v
 ```
 
-运行完整集合：
+运行全部 Agent 自测与行为验收：
 
 ```powershell
-python -B -m unittest discover -s tests -t . -p 'test_*.py' -v
+python -B -m pytest -q
 ```
 
-说明与契约见 [验收说明](phase-1-acceptance.md)、[CLI 契约](cli-contract.md)。下一步实现应保持断言与需求期望不变，使行为测试实际转绿。
+测试命令应使用 Python 3.13。此次 pytest 使用 Python 3.13.12 运行器，并从 uv 创建的 `.venv` 加载项目依赖；行为验收通过 `AGENT_ACCEPTANCE_COMMAND` 启动 `.venv` 中的 CLI。普通环境下可直接用已激活的项目环境运行以上命令。完整需求、场景和报告格式见 [验收说明](phase-1-acceptance.md) 与 [CLI 契约](cli-contract.md)。

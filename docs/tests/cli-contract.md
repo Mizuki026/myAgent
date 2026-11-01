@@ -1,6 +1,6 @@
 # 第一阶段 CLI 验收契约
 
-日期：2026-10-31。用户已确认通过 CLI 的 JSON 输入和报告验收，并允许本次 Agent 尚未实现时行为测试处于 RED 状态。
+日期：2026-10-31。用户已确认通过 CLI 的 JSON 输入和报告验收。离线测试通过本地 HTTP 模型替身执行，不依赖真实 DeepSeek API。
 
 本契约固定测试可见的输入、结果和模型替身协议。内部模块、框架、数据库表结构和提示词组织可自行实现；已有实现也可通过薄 CLI 适配器接入。
 
@@ -9,7 +9,7 @@
 默认命令：
 
 ```powershell
-python -B -m app --request request.json --report report.json
+uv run python -B -m app --request request.json --report report.json
 ```
 
 测试通过环境变量 `AGENT_ACCEPTANCE_COMMAND` 指定其他命令前缀，值为 JSON 字符串数组，例如：

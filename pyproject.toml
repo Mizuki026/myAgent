@@ -1,0 +1,30 @@
+[project]
+name = "my-agent"
+version = "0.1.0"
+description = "A local personal coding agent for targeted Python function changes"
+readme = "docs/product/coding-agent-mvp-design.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "openai>=2.8.1",
+    "pydantic>=2.12.4",
+    "python-dotenv>=1.2.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+    "ruff>=0.14.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+norecursedirs = ["generated_acceptance", "fixtures", ".venv", ".git"]
+cache_dir = ".uv-cache/pytest"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
