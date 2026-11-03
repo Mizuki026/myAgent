@@ -5,9 +5,12 @@ description = "A local personal coding agent for targeted Python function change
 readme = "docs/product/coding-agent-mvp-design.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "fastapi>=0.162.0",
+    "httpx>=0.28.1",
     "openai>=2.8.1",
     "pydantic>=2.12.4",
     "python-dotenv>=1.2.1",
+    "uvicorn>=0.54.0",
 ]
 
 [dependency-groups]
