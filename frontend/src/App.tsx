@@ -24,6 +24,10 @@ function App() {
   const [name, setName] = useState("");
   const [workspace, setWorkspace] = useState("");
   const [python, setPython] = useState("");
+  const [pytestArgs, setPytestArgs] = useState("");
+  const [maxModelRequests, setMaxModelRequests] = useState(40);
+  const [commandTimeout, setCommandTimeout] = useState(120);
+  const [outputLimitBytes, setOutputLimitBytes] = useState(1_048_576);
   const [requirement, setRequirement] = useState("");
   const [answer, setAnswer] = useState("");
   const [services, setServices] = useState<ServiceSnapshot[]>([]);
@@ -38,6 +42,18 @@ function App() {
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId],
   );
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    setName(selectedProject.name);
+    setWorkspace(selectedProject.workspace);
+    setPython(selectedProject.python_executable);
+    setPytestArgs(selectedProject.pytest_args.join("\n"));
+    setMaxModelRequests(selectedProject.limits.max_model_requests);
+    setCommandTimeout(selectedProject.limits.command_timeout_seconds);
+    setOutputLimitBytes(selectedProject.limits.output_limit_bytes);
+    setInspection(null);
+  }, [selectedProject]);
 
   const refreshProjects = useCallback(async () => {
     const page = await api.getProjects();
@@ -126,21 +142,56 @@ function App() {
     }
   }
 
+  function projectInput(extraChecks = selectedProject?.extra_checks ?? []) {
+    if (!inspection?.ready || !python) throw new Error("请先检查 Git、pytest 和 Python 环境。");
+    const limits = {
+      max_model_requests: maxModelRequests,
+      command_timeout_seconds: commandTimeout,
+      output_limit_bytes: outputLimitBytes,
+    };
+    if (
+      !Number.isInteger(limits.max_model_requests) || limits.max_model_requests < 1 || limits.max_model_requests > 1000 ||
+      !Number.isInteger(limits.command_timeout_seconds) || limits.command_timeout_seconds < 1 || limits.command_timeout_seconds > 3600 ||
+      !Number.isInteger(limits.output_limit_bytes) || limits.output_limit_bytes < 256 || limits.output_limit_bytes > 10_000_000
+    ) {
+      throw new Error("执行限制超出允许范围，请检查模型请求数、超时秒数和输出字节数。");
+    }
+    return {
+      name: name.trim(),
+      workspace: inspection.workspace,
+      python_executable: python,
+      pytest_args: pytestArgs.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+      extra_checks: extraChecks,
+      limits,
+    };
+  }
+
   async function saveProject() {
-    if (!inspection?.ready || !python) return;
     setBusy(true);
     setError("");
     try {
-      const project = await api.saveProject({
-        name: name.trim(),
-        workspace: inspection.workspace,
-        python_executable: python,
-        pytest_args: inspection.suggested_pytest_args,
-        extra_checks: [],
-      });
+      const project = await api.saveProject(projectInput([]));
       await refreshProjects();
       setSelectedProjectId(project.id);
       setNotice("项目配置已保存。");
+      setInspection(null);
+    } catch (reason) {
+      showError(reason);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateProject() {
+    if (!selectedProject) return;
+    setBusy(true);
+    setError("");
+    try {
+      const input = projectInput();
+      const project = await api.patchProject(selectedProject.id, selectedProject.revision, input);
+      await refreshProjects();
+      setSelectedProjectId(project.id);
+      setNotice("项目配置已更新。");
       setInspection(null);
     } catch (reason) {
       showError(reason);
@@ -309,6 +360,30 @@ function App() {
                 <input value={name} onChange={(event) => setName(event.target.value)} placeholder="我的项目" />
               </label>
             </div>
+            <div className="project-options-grid">
+              <label className="field pytest-args-field">
+                <span>pytest 参数（每行一个参数）</span>
+                <textarea
+                  value={pytestArgs}
+                  onChange={(event) => setPytestArgs(event.target.value)}
+                  placeholder="例如：\n-m\nnot slow"
+                  rows={3}
+                  aria-label="pytest 参数"
+                />
+              </label>
+              <label className="field">
+                <span>模型请求上限</span>
+                <input type="number" min={1} max={1000} value={maxModelRequests} onChange={(event) => setMaxModelRequests(Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>命令超时（秒）</span>
+                <input type="number" min={1} max={3600} value={commandTimeout} onChange={(event) => setCommandTimeout(Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>输出上限（字节）</span>
+                <input type="number" min={256} max={10_000_000} value={outputLimitBytes} onChange={(event) => setOutputLimitBytes(Number(event.target.value))} />
+              </label>
+            </div>
             <div className="form-actions">
               <button className="button secondary" disabled={busy || !workspace.trim()} onClick={() => void inspect()}>
                 检查环境
@@ -319,9 +394,16 @@ function App() {
                 </span>
               )}
               {inspection?.ready && (
-                <button className="button primary" disabled={busy || !name.trim()} onClick={() => void saveProject()}>
-                  保存项目
-                </button>
+                <>
+                  <button className="button primary" disabled={busy || !name.trim()} onClick={() => void saveProject()}>
+                    保存为新项目
+                  </button>
+                  {selectedProject?.workspace === inspection.workspace && (
+                    <button className="button secondary" disabled={busy || !name.trim()} onClick={() => void updateProject()}>
+                      更新所选项目
+                    </button>
+                  )}
+                </>
               )}
             </div>
             {inspection && (

@@ -63,6 +63,9 @@ h1 { margin-bottom: 7px; font-size: 27px; letter-spacing: -.04em; }
 .panel-heading h2 { margin: 0 0 4px; font-size: 14px; }
 .step-number { display: grid; flex: 0 0 auto; width: 31px; height: 31px; place-items: center; border-radius: 8px; background: #f1f2ed; color: #737970; font: 11px 'DM Mono', monospace; }
 .project-form-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 13px; }
+.project-options-grid { display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr; gap: 13px; margin-top: 14px; }
+.field textarea { width: 100%; min-height: 70px; padding: 9px 10px; resize: vertical; border: 1px solid #dedfd8; border-radius: 7px; background: #fff; color: var(--ink); outline: none; font: 10px/1.5 'DM Mono', monospace; }
+.field input[type="number"] { font-variant-numeric: tabular-nums; }
 .field { display: grid; gap: 7px; font-size: 10px; }
 .field input, .field select { font-size: 11px; }
 .form-actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
@@ -138,6 +141,7 @@ h1 { margin-bottom: 7px; font-size: 27px; letter-spacing: -.04em; }
 @media (max-width: 900px) {
   .layout { grid-template-columns: 205px minmax(0, 1fr); }
   .main-column { padding: 28px 24px; }
+  .project-options-grid { grid-template-columns: 1fr 1fr; }
   .detail-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 650px) {
@@ -152,6 +156,7 @@ h1 { margin-bottom: 7px; font-size: 27px; letter-spacing: -.04em; }
   .page-title-row { align-items: flex-start; }
   .connection-chip { display: none; }
   .project-form-grid { grid-template-columns: 1fr; }
+  .project-options-grid { grid-template-columns: 1fr; }
   .panel { padding: 16px; }
   .metrics-row { grid-template-columns: repeat(2, 1fr); gap: 12px 0; }
   .metrics-row > div:nth-child(3) { padding-left: 0; border-left: 0; }
