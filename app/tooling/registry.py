@@ -57,8 +57,13 @@ class ToolRegistry:
             return self._failure("INVALID_ARGUMENTS", "Arguments must be an object.", started)
         try:
             parsed = registration.arguments.model_validate(arguments, strict=True)
-        except ValidationError as error:
-            return self._failure("INVALID_ARGUMENTS", str(error)[:1000], started, True)
+        except ValidationError:
+            return self._failure(
+                "INVALID_ARGUMENTS",
+                "Arguments did not match the declared tool schema.",
+                started,
+                True,
+            )
         if context.phase not in registration.phases:
             return self._failure(
                 "INVALID_PHASE", "This tool is not available in the current task phase.", started

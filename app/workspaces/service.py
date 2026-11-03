@@ -159,6 +159,7 @@ class WorkspaceService:
 
     def create_file(self, args: CreateFileArgs, ctx: ToolContext) -> dict[str, object]:
         path = self._resolve(ctx, args.path)
+        self._validate_write(ctx, path, "create")
         if not path.parent.is_dir():
             raise WorkspaceFailure("FILE_NOT_FOUND", "Parent directory must already exist.")
         content = args.content.replace("\r\n", "\n").replace("\r", "\n")
@@ -178,6 +179,7 @@ class WorkspaceService:
 
     def edit_file(self, args: EditFileArgs, ctx: ToolContext) -> dict[str, object]:
         path = self._resolve(ctx, args.path)
+        self._validate_write(ctx, path, "edit")
         self._check_file(path)
         if path.stat().st_size > MAX_FILE_BYTES:
             raise WorkspaceFailure("FILE_TOO_LARGE", "Editable text files are limited to 1 MiB.")
@@ -191,6 +193,7 @@ class WorkspaceService:
         updated = _replace_preserving_newlines(text, args.old_text, args.new_text)
         if updated is None:
             raise WorkspaceFailure("NON_UNIQUE_MATCH", "old_text must match exactly once.", True)
+        self._check_writable_text(args.old_text, ctx)
         self._check_writable_text(args.new_text, ctx)
         output = _encode(updated, raw)
         if len(output) > MAX_FILE_BYTES:
@@ -200,12 +203,21 @@ class WorkspaceService:
         _atomic_write(path, output)
         after = hashlib.sha256(output).hexdigest()
         relative = path.relative_to(ctx.workspace).as_posix()
-        self._record(ctx, "edit", relative, before, after)
+        self._record(
+            ctx,
+            "edit",
+            relative,
+            before,
+            after,
+            details={"old_text": args.old_text, "new_text": args.new_text},
+        )
         return self._change("edit", relative, before, after, True)
 
     def move_file(self, args: MoveFileArgs, ctx: ToolContext) -> dict[str, object]:
         source = self._resolve(ctx, args.source)
         target = self._resolve(ctx, args.target)
+        self._validate_write(ctx, source, "move")
+        self._validate_write(ctx, target, "create")
         self._check_file(source)
         if not target.parent.is_dir():
             raise WorkspaceFailure("FILE_NOT_FOUND", "Target parent directory must exist.")
@@ -230,6 +242,7 @@ class WorkspaceService:
 
     def delete_file(self, args: DeleteFileArgs, ctx: ToolContext) -> dict[str, object]:
         path = self._resolve(ctx, args.path)
+        self._validate_write(ctx, path, "delete")
         self._check_file(path)
         before = hashlib.sha256(path.read_bytes()).hexdigest()
         if before.casefold() != args.expected_hash.casefold():
@@ -381,6 +394,12 @@ class WorkspaceService:
             raise WorkspaceFailure("CREDENTIAL_PROTECTION", "Credential values cannot be written.")
 
     @staticmethod
+    def _validate_write(ctx: ToolContext, path: Path, operation: str) -> None:
+        validate = ctx.services.get("validate_write")
+        if validate:
+            validate(path.relative_to(ctx.workspace).as_posix(), operation)
+
+    @staticmethod
     def _record(
         ctx: ToolContext,
         operation: str,
@@ -388,6 +407,7 @@ class WorkspaceService:
         before: str | None,
         after: str | None,
         target: str | None = None,
+        details: dict[str, object] | None = None,
     ) -> None:
         change: dict[str, object] = {
             "operation": operation,
@@ -397,8 +417,12 @@ class WorkspaceService:
         }
         if target is not None:
             change["target"] = target
-        ctx.record_change(change)
-        ctx.emit(type="file_changed", **change)
+        ctx.record_change({**change, **(details or {})})
+        ctx.emit(
+            type="file_changed",
+            **{key: value for key, value in change.items() if key != "operation"},
+            operation=operation,
+        )
 
     @staticmethod
     def _change(

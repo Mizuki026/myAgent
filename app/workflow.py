@@ -4,11 +4,15 @@ import hashlib
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from dotenv import dotenv_values
 from openai import OpenAI
+
+from app.tooling.registry import ToolRegistry
+from app.tooling.types import ToolContext
 
 from .checks import CheckOutcome, CheckRunner
 from .models import AgentReport, AgentRequest, Artifact, CheckResult
@@ -24,7 +28,16 @@ from .workspace import (
 
 
 class AgentWorkflow:
-    def __init__(self, request: AgentRequest, report_path: Path) -> None:
+    def __init__(
+        self,
+        request: AgentRequest,
+        report_path: Path,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
+        tool_registry: ToolRegistry | None = None,
+        tool_context_factory: Callable[[str, int], ToolContext] | None = None,
+        delivery_guard: Callable[[], None] | None = None,
+        initial_git_snapshot: dict[str, Any] | None = None,
+    ) -> None:
         self.request = request
         self.workspace = Path(request.workspace).resolve()
         self.state_dir = Path(request.state_dir).resolve()
@@ -33,6 +46,13 @@ class AgentWorkflow:
         self.state: dict[str, Any] = {}
         self.client: OpenAI | None = None
         self.secrets: list[str] = []
+        self.event_callback = event_callback
+        self.current_phase = "preflight"
+        self.tool_registry = tool_registry
+        self.tool_context_factory = tool_context_factory
+        self.delivery_guard = delivery_guard
+        self.initial_git_snapshot = initial_git_snapshot
+        self.extra_check_runner: Callable[[int], list[dict[str, Any]]] | None = None
 
     def run(self) -> AgentReport:
         if not self.workspace.is_dir():
@@ -64,6 +84,7 @@ class AgentWorkflow:
                 "frozen_backups": {},
                 "initial_acceptance": self._snapshot_initial_acceptance(),
                 "initial_index_clean": self._initial_index_clean(),
+                "initial_git_snapshot": self.initial_git_snapshot,
                 "status": "running",
             }
             self.store.create(self.request.task_id, self._redact_value(self.state))
@@ -155,44 +176,175 @@ class AgentWorkflow:
                 return self._finish(
                     "needs_clarification", self._summary(final, "需要先明确需求。"), questions
                 )
-            if final["kind"] != "implementation_ready":
-                self._emit(
-                    type="protocol_error",
-                    code="PROTOCOL_ERROR",
-                    attempt=attempt,
-                    reason="Expected implementation_ready at the end of an implementation round.",
-                )
-                return self._finish("failed", "模型没有按协议结束实现轮次。")
-            self._restore_frozen_acceptance_if_needed()
-            outcomes = [
-                self._run_check(runner, self._check_spec("acceptance"), attempt),
-                self._run_check(runner, self._check_spec("regression"), attempt),
-            ]
-            self._restore_frozen_acceptance_if_needed()
-            passed = all(outcome.passed for outcome in outcomes)
-            for outcome in outcomes:
-                self._emit_check_codes(outcome.codes, attempt=attempt)
-            if passed:
-                if not self.state.get("implementation_paths"):
-                    return self._finish(
-                        "failed", "测试通过但没有记录任何实现文件变更，未创建提交。"
-                    )
-                commit = self._commit_agent_changes()
-                if not commit:
-                    return self._finish("failed", "验证通过，但 agent 自有改动无法安全提交。")
-                self.state["commit"] = commit
-                return self._finish(
-                    "succeeded", self._summary(final, "修改已通过验收与回归测试，并创建了提交。")
-                )
-            self._append_verification_feedback(outcomes, attempt)
-            self._save()
-            if self.request.pause_after_attempt == attempt:
-                self.state["status"] = "paused"
-                self._save()
-                return self._finish(
-                    "paused", f"已完成第 {attempt} 次实现尝试并保存状态，可使用相同 task_id 恢复。"
-                )
+            result = self._process_implementation_result(tools, runner, final, attempt)
+            if result is not None:
+                return result
         return self._finish("failed", "三次实现与修复预算已用尽，验证仍未全部通过。")
+
+    def _process_implementation_result(
+        self,
+        tools: WorkspaceTools,
+        runner: CheckRunner,
+        final: dict[str, Any],
+        attempt: int,
+    ) -> AgentReport | None:
+        if final.get("kind") != "implementation_ready":
+            self._emit(
+                type="protocol_error",
+                code="PROTOCOL_ERROR",
+                attempt=attempt,
+                reason="Expected implementation_ready at the end of an implementation round.",
+            )
+            return self._finish("failed", "模型没有按协议结束实现轮次。")
+        self._restore_frozen_acceptance_if_needed()
+        outcomes = [
+            self._run_check(runner, self._check_spec("acceptance"), attempt),
+            self._run_check(runner, self._check_spec("regression"), attempt),
+        ]
+        self._restore_frozen_acceptance_if_needed()
+        passed = all(outcome.passed for outcome in outcomes)
+        for outcome in outcomes:
+            self._emit_check_codes(outcome.codes, attempt=attempt)
+        extra_results: list[dict[str, Any]] = []
+        if passed and self.extra_check_runner is not None:
+            try:
+                extra_results = self.extra_check_runner(attempt)
+            except Exception as error:
+                extra_results = [
+                    {
+                        "name": "extra_check",
+                        "returncode": -1,
+                        "timed_out": False,
+                        "output_truncated": False,
+                        "error": self._redact(str(error))[:1000],
+                    }
+                ]
+            for result in extra_results:
+                self._emit(type="extra_check_completed", attempt=attempt, **result)
+            passed = all(
+                result.get("returncode") == 0
+                and not result.get("timed_out")
+                and not result.get("output_truncated")
+                and not result.get("error")
+                for result in extra_results
+            )
+        if passed:
+            if not self.state.get("implementation_paths"):
+                return self._finish("failed", "测试通过但没有记录任何实现文件变更，未创建提交。")
+            if self.delivery_guard is not None:
+                try:
+                    self.delivery_guard()
+                except Exception as error:
+                    code = getattr(error, "code", "USER_CHANGE_CONFLICT")
+                    self._emit(type="commit_error", code=code, reason=str(error))
+                    return self._finish("failed", "验证通过，但工作区出现未归属变化，未创建提交。")
+            commit = self._commit_agent_changes()
+            if not commit:
+                return self._finish("failed", "验证通过，但 agent 自有改动无法安全提交。")
+            self.state["commit"] = commit
+            return self._finish(
+                "succeeded", self._summary(final, "修改已通过验收与回归测试，并创建了提交。")
+            )
+        self._append_verification_feedback(outcomes, attempt)
+        if extra_results:
+            self._append_message(
+                "user",
+                "项目额外检查未全部通过：\n"
+                + json.dumps(extra_results, ensure_ascii=False, sort_keys=True),
+            )
+        self._save()
+        if self.request.pause_after_attempt == attempt:
+            self.state["status"] = "paused"
+            self._save()
+            return self._finish(
+                "paused", f"已完成第 {attempt} 次实现尝试并保存状态，可使用相同 task_id 恢复。"
+            )
+        return None
+
+    def continue_with_answer(self, answer: str) -> AgentReport:
+        """Continue a saved Web task after its user answered a clarification."""
+        if not answer.strip():
+            raise WorkflowFailure("INVALID_ARGUMENTS", "Clarification answer cannot be empty.")
+        self._load_configuration()
+        self.state = self.store.get(self.request.task_id) or {}
+        if not self.state or self.state.get("status") != "needs_clarification":
+            raise WorkflowFailure("INVALID_TASK_STATE", "Task is not waiting for clarification.")
+        self._validate_resume_request()
+        self._verify_continuation_workspace()
+        if self.delivery_guard is not None:
+            try:
+                self.delivery_guard()
+            except Exception as error:
+                raise WorkflowFailure(
+                    getattr(error, "code", "WORKSPACE_CHANGED"), str(error)
+                ) from error
+        self.client = self._model_client()
+        self._append_message("user", "补充说明：" + answer.strip())
+        self.state["status"] = "running"
+        self._save()
+        tools = WorkspaceTools(self.workspace, self.state, self._emit, self._redact)
+        runner = CheckRunner(self.workspace, self.state_dir, self.request.limits, self._redact)
+        phase = self.state.get("phase")
+        if phase == "preparation":
+            final = self._model_turn(tools, runner, "preparation", 0)
+            if final["kind"] == "needs_clarification":
+                questions = self._questions(final)
+                return self._finish(
+                    "needs_clarification", self._summary(final, "需要先明确需求。"), questions
+                )
+            if final["kind"] != "acceptance_ready":
+                return self._finish("failed", "模型未按协议完成验收准备。")
+            if not self._freeze_acceptance(tools):
+                return self._finish("failed", "无法读取或固定生成的验收测试。")
+            baseline = self._run_check(runner, self._check_spec("acceptance"), 0)
+            self.state["acceptance_baseline"] = baseline.record.model_dump(mode="json")
+            valid, codes = runner.validate_acceptance_baseline(baseline)
+            if codes:
+                self._emit_check_codes(codes, attempt=0)
+                return self._finish("failed", "生成的验收测试未形成有效报告。")
+            if not valid:
+                return self._finish("failed", "生成的验收测试无法判断原始实现。")
+            if baseline.passed:
+                self._restore_initial_acceptance()
+                return self._finish("no_changes", "原始实现已满足验收与回归测试，无需修改。")
+            self.state["phase"] = "implementation"
+            self._append_message(
+                "user",
+                "固定验收在原始实现上失败，回归基线通过。现在按需求实现修改；"
+                "每轮以 implementation_ready 结束。",
+            )
+            self._save()
+            return self._implementation_loop(tools, runner)
+        if phase == "implementation":
+            attempt = self.state.get("attempts", 0)
+            final = self._model_turn(tools, runner, "implementation", attempt)
+            if final["kind"] == "needs_clarification":
+                return self._finish(
+                    "needs_clarification",
+                    self._summary(final, "需要先明确需求。"),
+                    self._questions(final),
+                )
+            result = self._process_implementation_result(tools, runner, final, attempt)
+            return result or self._implementation_loop(tools, runner)
+        raise WorkflowFailure("INVALID_TASK_STATE", "Saved task phase cannot accept clarification.")
+
+    def _verify_continuation_workspace(self) -> None:
+        head = self._git(["rev-parse", "HEAD"]).strip()
+        if head != self.state.get("baseline_commit"):
+            raise WorkflowFailure(
+                "WORKSPACE_CHANGED", "Git HEAD changed while waiting for clarification."
+            )
+        expected_hashes = dict(self.state.get("read_hashes", {}))
+        expected_hashes.update(self.state.get("latest_hashes", {}))
+        for relative, expected in expected_hashes.items():
+            path = (self.workspace / relative).resolve()
+            if not path.is_relative_to(self.workspace) or not path.is_file():
+                raise WorkflowFailure("WORKSPACE_CHANGED", f"Task file disappeared: {relative}")
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            if actual != expected:
+                raise WorkflowFailure(
+                    "WORKSPACE_CHANGED", f"Task file changed while waiting: {relative}"
+                )
 
     def _model_turn(
         self,
@@ -201,17 +353,26 @@ class AgentWorkflow:
         phase: str,
         attempt: int,
     ) -> dict[str, Any]:
+        self.current_phase = phase
         while True:
             if self.state["model_requests"] >= self.request.limits.max_model_requests:
                 raise WorkflowFailure("MODEL_REQUEST_LIMIT", "Model request limit reached.")
             assert self.client is not None
             self.state["model_requests"] += 1
             self._save()
+            self._notify(
+                {
+                    "task_id": self.request.task_id,
+                    "type": "model_request",
+                    "phase": phase,
+                    "attempt": attempt,
+                }
+            )
             try:
                 response = self.client.chat.completions.create(
                     model=self.request.model.name,
                     messages=self.state["messages"],
-                    tools=TOOLS,
+                    tools=self._tool_schemas(),
                     tool_choice="auto",
                     stream=False,
                 )
@@ -237,8 +398,21 @@ class AgentWorkflow:
                         arguments = None
                     if name == "run_checks":
                         result = self._run_checks_tool(arguments, runner, phase, attempt)
+                    elif self.tool_registry is not None and self.tool_context_factory is not None:
+                        context = self.tool_context_factory(phase, attempt)
+                        result = self.tool_registry.invoke(name, arguments, context).model_dump(
+                            mode="json"
+                        )
                     else:
                         result = tools.call(name, arguments, phase, attempt)
+                    if name == "read_file" and isinstance(result, dict):
+                        payload = result.get("data") if result.get("ok") is True else result
+                        if isinstance(payload, dict):
+                            path = payload.get("path")
+                            digest = payload.get("sha256")
+                            if isinstance(path, str) and isinstance(digest, str):
+                                self.state.setdefault("read_hashes", {})[path] = digest
+                                self._save()
                     self._append_message(
                         "tool",
                         json.dumps(result, ensure_ascii=False, sort_keys=True),
@@ -504,8 +678,31 @@ class AgentWorkflow:
         try:
             self._git(["read-tree", baseline], env=environment)
             for relative in paths:
-                expected = self.state.get("latest_hashes", {}).get(relative)
                 current_path = (self.workspace / relative).resolve(strict=False)
+                if not current_path.is_relative_to(self.workspace):
+                    self._emit(
+                        type="commit_error",
+                        code="OUTSIDE_WORKSPACE",
+                        path=relative,
+                        reason="A changed path resolved outside the workspace.",
+                    )
+                    return None
+                if relative in self.state.get("deleted_paths", []):
+                    if current_path.exists():
+                        self._emit(
+                            type="commit_error",
+                            code="STALE_FILE",
+                            path=relative,
+                            reason="A deleted task file reappeared before commit.",
+                        )
+                        return None
+                    baseline_entry = self._git(["ls-tree", baseline, "--", relative]).strip()
+                    if baseline_entry:
+                        self._git(
+                            ["update-index", "--force-remove", "--", relative], env=environment
+                        )
+                    continue
+                expected = self.state.get("latest_hashes", {}).get(relative)
                 if not current_path.is_relative_to(self.workspace) or not current_path.is_file():
                     self._emit(
                         type="commit_error",
@@ -523,7 +720,11 @@ class AgentWorkflow:
                         reason="A file changed after the agent last edited it; refusing to commit.",
                     )
                     return None
-                committed_raw = self._replay_edits_on_baseline(relative)
+                committed_raw = (
+                    current_raw
+                    if relative in self.state.get("created_paths", [])
+                    else self._replay_edits_on_baseline(relative)
+                )
                 if committed_raw is None:
                     self._emit(
                         type="commit_error",
@@ -549,6 +750,12 @@ class AgentWorkflow:
                     env=environment,
                 )
             tree = self._git(["write-tree"], env=environment).strip()
+            baseline_tree = self._git(["rev-parse", f"{baseline}^{{tree}}"]).strip()
+            if tree == baseline_tree:
+                self._emit(
+                    type="commit_error", code="NO_CHANGES", reason="Task has no net Git changes."
+                )
+                return None
             author_env = environment.copy()
             if not self._git_optional(["config", "user.name"]):
                 author_env["GIT_AUTHOR_NAME"] = "Local Coding Agent"
@@ -728,6 +935,23 @@ class AgentWorkflow:
             if value is not None:
                 event[key] = self._redact_value(value)
         self.store.add_event(self.request.task_id, event)
+        self._notify({**event, "task_id": self.request.task_id, "phase": self.current_phase})
+
+    def _notify(self, event: dict[str, Any]) -> None:
+        if self.event_callback is None:
+            return
+        try:
+            self.event_callback(self._redact_value(event))
+        except Exception:
+            return
+
+    def _tool_schemas(self) -> list[dict[str, object]]:
+        if self.tool_registry is None:
+            return TOOLS
+        check_schema = next(
+            schema for schema in TOOLS if schema.get("function", {}).get("name") == "run_checks"
+        )
+        return [*self.tool_registry.schemas(), check_schema]
 
     def _save(self) -> None:
         self.store.save(self.request.task_id, self._redact_value(self.state))

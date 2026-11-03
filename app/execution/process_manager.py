@@ -324,6 +324,14 @@ class ProcessManager:
         ]
         return sorted(result, key=lambda item: item.created_at)
 
+    def list_all_services(self) -> list[ServiceSnapshot]:
+        with self._lock:
+            services = list(self._services.values())
+        return sorted(
+            [self._observe(service) for service in services],
+            key=lambda item: item.created_at,
+        )
+
     def stop_service(self, service_id: str, ctx: ToolContext) -> ServiceSnapshot:
         service = self._find(service_id)
         if service.snapshot.project_id != ctx.project_id:
